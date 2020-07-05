@@ -4,7 +4,7 @@ library(furrr)
 
 plan(multiprocess)
 availableCores()
-options("future.fork.enable" = T)
+options("future.fork.enable" = TRUE)
 
 league.info = read_csv('league_info.csv')
 
@@ -38,7 +38,8 @@ games.split = league.info %>%
         filter(date <= Sys.Date()) %>% 
         filter(!is.na(score1))
     ),
-  )
+  ) %>% 
+  ungroup()
 
 games.split
 
@@ -64,7 +65,7 @@ generate.points.distribution = function(post.covid.lg) {
   }
   
   # redo the season 10,000 times to get an idea of how often home teams should be accruing points
-  sims = future_map_dbl(1:10000, get_exp_home_points)
+  sims = map_dbl(1:10000, get_exp_home_points)
   
   return(sims)
 }
@@ -78,7 +79,7 @@ eval.after = games.split %>%
         pull(home.pts) %>% 
         sum()
     ),
-    pts.distribution = map(post.covid.data, generate.points.distribution),
+    pts.distribution = future_map(post.covid.data, generate.points.distribution),
     exp.home.pts = map_dbl(pts.distribution, mean),
     sd.home.pts = map_dbl(pts.distribution, sd),
     actual.z = (home.pts - exp.home.pts) / sd.home.pts
@@ -177,43 +178,97 @@ before.modeled
 # check all possibilities from a total elimination of HFA to a 15% increase in HFA for each league
 hfa.adjustment = seq(0, 1.15, 0.05)
 
-after.adjustments = before.modeled %>% 
+all.adjustments = before.modeled %>% 
   select(-data, -pre.covid.data) %>% 
   mutate(hfa.adjustment = map(league, ~hfa.adjustment)) %>% 
   unnest(hfa.adjustment) %>% 
-  mutate(hfa.now = hfa.adjustment * hfa.before)
+  mutate(hfa.now = hfa.adjustment * hfa.before) %>% 
+  # get tie inflations
+  left_join(dif %>% select(-league_id))
 
-after.adjustments
+all.adjustments
 
-m = after.adjustments$model[[5]]
-m
+predict.new.data = function(data, model, hfa.now, league.dif) {
+  model$coefficients['home'] <- hfa.now
 
-new.hfa = after.adjustments$hfa.now[[5]]
-new.hfa
-
-m$coefficients['home'] <- new.hfa
-
-m
-
-make.projection = function(s1, s2, h, model) {
-  predict(model, newdata = tibble(spi = s1, spi_opp = s2, home = h)) %>%
-    exp()
+  make.projection = function(s1, s2, h, model) {
+    predict(model, newdata = tibble(spi = s1, spi_opp = s2, home = h)) %>%
+      exp()
+  }
+  
+  # with the two lambdas in hand, construct a score matrix
+  # each lambda is the expected mean of a poisson distribution
+  
+  make.score.matrix = function(l1, l2, dif) {
+    max.goals = 10
+    # construct the distributions
+    goals.dist1 = dpois(0:max.goals, l1)
+    goals.dist2 = dpois(0:max.goals, l2)
+    score.matrix = goals.dist1 %o% goals.dist2
+    # adjust for league tie inflation
+    diag(score.matrix) = dif * diag(score.matrix)
+    sum(score.matrix)
+    # divide all probabilities by new inflated total
+    score.matrix = score.matrix / sum(score.matrix)
+    return(score.matrix)
+  }
+  
+  data %>% 
+    select(season, date, team1, team2, spi1, spi2, score1, score2) %>% 
+    mutate(
+      pred_lambda1 = map2_dbl(
+        spi1, spi2,
+        ~make.projection(.x, .y, 1, model)
+      ),
+      pred_lambda2 = map2_dbl(
+        spi1, spi2,
+        ~make.projection(.y, .x, -1, model)
+      ),
+      score.matrix = map2(pred_lambda1, pred_lambda2, make.score.matrix, dif = league.dif),
+      probtie = map_dbl(score.matrix, ~sum(diag(.x))),
+      prob1 = map_dbl(score.matrix, ~sum(.x[upper.tri(.x)])),
+      prob2 = map_dbl(score.matrix, ~sum(.x[lower.tri(.x)])),
+    )
 }
 
-after.adjustments$post.covid.data[[5]] %>% 
-  select(1:8) %>% 
+all.adjustments.predicted = all.adjustments %>% 
   mutate(
-    pred_lambda1 = map2_dbl(
-      spi1, spi2,
-      ~make.projection(.x, .y, 1, m)
-    ),
-    pred_lambda2 = map2_dbl(
-      spi1, spi2,
-      ~make.projection(.y, .x, -1, m)
+    new.preds = future_pmap(
+      list(post.covid.data, model, hfa.now, tie_inflation),
+      predict.new.data,
+      .progress = TRUE
     )
-  ) %>% 
-  view()
+  )
 
+all.adjustments.predicted
+
+# all.adjustments.predicted$new.preds[[9]]
+
+eval.all.adjustments.predicted = all.adjustments.predicted %>% 
+  ungroup() %>% 
+  mutate(
+    home.pts = map_dbl(
+      new.preds,
+      ~.x %>% 
+        mutate(home.pts = (score1 > score2) * 3 + (score1 == score2) * 1) %>% 
+        pull(home.pts) %>% 
+        sum()
+    ),
+    pts.distribution = future_map(post.covid.data, generate.points.distribution, .progress = TRUE),
+    exp.home.pts = map_dbl(pts.distribution, mean),
+    sd.home.pts = map_dbl(pts.distribution, sd),
+    actual.z = (home.pts - exp.home.pts) / sd.home.pts
+  ) %>% 
+  select(-post.covid.data, -model) %>% 
+  arrange(actual.z)
+
+eval.all.adjustments.predicted
+
+eval.all.adjustments.predicted %>% 
+  group_by(league) %>% 
+  filter(actual.z == min(abs(actual.z)))
+  
+  
 
 # old ---------------------------------------------------------------------
 
@@ -230,7 +285,7 @@ pre.covid.preds = pre.covid.games %>%
     pred_lambda2 = map2_dbl(
       spi1, spi2,
       ~make.projection(.y, .x, -1)
-    )
+    ),
   )
 
 pre.covid.preds
@@ -254,21 +309,7 @@ pre.covid.preds
 # 
 # make.plot(l1, l2)
 
-make.score.matrix = function(l1, l2, dif) {
-  max.goals = 10
-  goals.dist1 = dpois(0:max.goals, l1)
-  goals.dist2 = dpois(0:max.goals, l2)
-  score.matrix = goals.dist1 %o% goals.dist2
-  sum(score.matrix)
-  # adjust for league tie inflation
-  score.matrix
-  diag(score.matrix) = dif * diag(score.matrix)
-  sum(score.matrix)
-  # divide all probabilities by new inflated total
-  score.matrix = score.matrix / sum(score.matrix)
-  sum(score.matrix)
-  return(score.matrix)
-}
+
 
 pre.covid.preds = pre.covid.preds %>% 
   mutate(
