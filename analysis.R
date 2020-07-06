@@ -4,7 +4,9 @@ library(furrr)
 
 plan(multiprocess)
 availableCores()
-options("future.fork.enable" = TRUE)
+options("future.fork.enable" = T)
+
+set.seed(10)
 
 league.info = read_csv('league_info.csv')
 
@@ -22,6 +24,7 @@ dif
 
 games.split = league.info %>% 
   select(league, restart_date) %>% 
+  mutate(restart_date = lubridate::mdy(restart_date)) %>% 
   left_join(games) %>% 
   select(-starts_with('importance'), -starts_with('xg'), -starts_with('nsxg'), -starts_with('adj_sc')) %>% 
   group_by(league) %>% 
@@ -65,13 +68,14 @@ generate.points.distribution = function(post.covid.lg) {
   }
   
   # redo the season 10,000 times to get an idea of how often home teams should be accruing points
-  sims = map_dbl(1:10000, get_exp_home_points)
+  sims = future_map_dbl(1:10000, get_exp_home_points)
   
   return(sims)
 }
 
 eval.after = games.split %>% 
   mutate(
+    post.covid.games = map_int(post.covid.data, nrow),
     home.pts = map_dbl(
       post.covid.data,
       ~.x %>% 
@@ -79,7 +83,7 @@ eval.after = games.split %>%
         pull(home.pts) %>% 
         sum()
     ),
-    pts.distribution = future_map(post.covid.data, generate.points.distribution),
+    pts.distribution = future_map(post.covid.data, generate.points.distribution, .progress = TRUE),
     exp.home.pts = map_dbl(pts.distribution, mean),
     sd.home.pts = map_dbl(pts.distribution, sd),
     actual.z = (home.pts - exp.home.pts) / sd.home.pts
@@ -113,6 +117,10 @@ plot.exp.pred.points = eval.after %>%
 plot.exp.pred.points
 
 ggsave(filename = 'expected-predicted-points-by-league.png', plot = plot.exp.pred.points, width = 12, height = 8)
+
+eval.after %>% 
+  select(-pts.distribution) %>% 
+  write_csv('expected-predicted-points-by-league.csv')
 
 # Part II -----------------------------------------------------------------
 
@@ -155,7 +163,6 @@ make.pre.covid.model = function(pre.covid.games) {
   pre.covid.train
   
   # fit model
-  
   model = lm(log(proj_score) ~ ns(spi, 3) + ns(spi_opp, 3) + home, data = pre.covid.train)
   
   return(model)
@@ -163,7 +170,7 @@ make.pre.covid.model = function(pre.covid.games) {
 
 before.modeled = games.split %>%
   mutate(
-    model = map(pre.covid.data, make.pre.covid.model),
+    model = future_map(pre.covid.data, make.pre.covid.model),
     hfa.before = map_dbl(model, ~pluck(coef(.x), 'home'))
   ) %>% 
   arrange(-hfa.before)
@@ -207,7 +214,6 @@ predict.new.data = function(data, model, hfa.now, league.dif) {
     score.matrix = goals.dist1 %o% goals.dist2
     # adjust for league tie inflation
     diag(score.matrix) = dif * diag(score.matrix)
-    sum(score.matrix)
     # divide all probabilities by new inflated total
     score.matrix = score.matrix / sum(score.matrix)
     return(score.matrix)
@@ -216,6 +222,7 @@ predict.new.data = function(data, model, hfa.now, league.dif) {
   data %>% 
     select(season, date, team1, team2, spi1, spi2, score1, score2) %>% 
     mutate(
+      # predict goals (lambdas)
       pred_lambda1 = map2_dbl(
         spi1, spi2,
         ~make.projection(.x, .y, 1, model)
@@ -224,14 +231,15 @@ predict.new.data = function(data, model, hfa.now, league.dif) {
         spi1, spi2,
         ~make.projection(.y, .x, -1, model)
       ),
+      # use lambdas for points distribution
       score.matrix = map2(pred_lambda1, pred_lambda2, make.score.matrix, dif = league.dif),
       probtie = map_dbl(score.matrix, ~sum(diag(.x))),
-      prob1 = map_dbl(score.matrix, ~sum(.x[upper.tri(.x)])),
-      prob2 = map_dbl(score.matrix, ~sum(.x[lower.tri(.x)])),
+      prob1 = map_dbl(score.matrix, ~sum(.x[lower.tri(.x)])),
+      prob2 = map_dbl(score.matrix, ~sum(.x[upper.tri(.x)])),
     )
 }
 
-all.adjustments.predicted = all.adjustments %>% 
+pred.adjustments = all.adjustments %>% 
   mutate(
     new.preds = future_pmap(
       list(post.covid.data, model, hfa.now, tie_inflation),
@@ -240,11 +248,30 @@ all.adjustments.predicted = all.adjustments %>%
     )
   )
 
-all.adjustments.predicted
+pred.adjustments
 
-# all.adjustments.predicted$new.preds[[9]]
+pred.adjustments$new.preds[[4]]
 
-eval.all.adjustments.predicted = all.adjustments.predicted %>% 
+# pred.adjustments %>% 
+#   select(-post.covid.data, -model) %>% 
+#   mutate(
+#     home.pts = map_dbl(
+#       new.preds,
+#       ~.x %>% 
+#         mutate(home.pts = (score1 > score2) * 3 + (score1 == score2) * 1) %>% 
+#         pull(home.pts) %>% 
+#         sum()
+#     ),
+#     exp.home.pts = map_dbl(
+#       new.preds,
+#       ~.x %>% 
+#         mutate(exp.home.pts = prob1 * 3 + probtie * 1) %>% 
+#         pull(exp.home.pts) %>% 
+#         sum()
+#     )
+#   )
+
+eval.adjustments = pred.adjustments %>% 
   ungroup() %>% 
   mutate(
     home.pts = map_dbl(
@@ -260,63 +287,22 @@ eval.all.adjustments.predicted = all.adjustments.predicted %>%
     actual.z = (home.pts - exp.home.pts) / sd.home.pts
   ) %>% 
   select(-post.covid.data, -model) %>% 
-  arrange(actual.z)
+  arrange(league, hfa.adjustment)
 
-eval.all.adjustments.predicted
+eval.adjustments
 
-eval.all.adjustments.predicted %>% 
+eval.adjustments %>%
+  group_by(league) %>%
+  mutate(best = abs(actual.z) == min(abs(actual.z))) %>%
+  select(-new.preds, -pts.distribution) %>%
+  write_csv('adjustment-results.csv')
+
+# pick the adjustment that is the least unlikely (based on z value)
+
+final.adjustment = eval.adjustments %>% 
   group_by(league) %>% 
-  filter(actual.z == min(abs(actual.z)))
-  
-  
+  filter(abs(actual.z) == min(abs(actual.z))) %>% 
+  arrange(hfa.adjustment) %>% 
+  select(league, hfa.before, hfa.adjustment, hfa.now)
 
-# old ---------------------------------------------------------------------
-
-
-
-
-
-pre.covid.preds = pre.covid.games %>% 
-  mutate(
-    pred_lambda1 = map2_dbl(
-      spi1, spi2,
-      ~make.projection(.x, .y, 1)
-    ),
-    pred_lambda2 = map2_dbl(
-      spi1, spi2,
-      ~make.projection(.y, .x, -1)
-    ),
-  )
-
-pre.covid.preds
-
-# l1 = pre.covid.preds$pred_lambda1[13]
-# l2 = pre.covid.preds$pred_lambda2[13]
-# 
-# make.plot = function(l1, l2) {
-#   tibble(
-#     goals = 0:10,
-#     g_home = dpois(goals, l1),
-#     g_away = dpois(goals, l2)
-#   ) %>% 
-#     pivot_longer(-goals, names_to = 'team', values_to = 'probs') %>% 
-#     ggplot(aes(goals, probs, color = team)) +
-#     geom_point() +
-#     geom_line() +
-#     scale_x_continuous(breaks = 0:10) +
-#     theme_minimal()
-# }
-# 
-# make.plot(l1, l2)
-
-
-
-pre.covid.preds = pre.covid.preds %>% 
-  mutate(
-    score.matrix = map2(pred_lambda1, pred_lambda2, make.score.matrix, dif = league.dif),
-    tie.prob = map_dbl(score.matrix, ~sum(diag(.x))),
-    home.prob = map_dbl(score.matrix, ~sum(.x[upper.tri(.x)])),
-    away.prob = map_dbl(score.matrix, ~sum(.x[lower.tri(.x)])),
-  )
-
-pre.covid.preds
+final.adjustment
