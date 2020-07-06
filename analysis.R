@@ -1,6 +1,7 @@
 library(tidyverse)
 library(splines)
 library(furrr)
+library(ggrepel)
 
 plan(multiprocess)
 availableCores()
@@ -85,11 +86,11 @@ eval.after = games.split %>%
     ),
     pts.distribution = future_map(post.covid.data, generate.points.distribution, .progress = TRUE),
     exp.home.pts = map_dbl(pts.distribution, mean),
-    sd.home.pts = map_dbl(pts.distribution, sd),
-    actual.z = (home.pts - exp.home.pts) / sd.home.pts
+    result.likelihood = map2_dbl(home.pts, pts.distribution, ~mean(.y < .x)),
+    significant = result.likelihood < 0.025 | result.likelihood > 0.975
   ) %>% 
   select(-ends_with('data')) %>% 
-  arrange(actual.z)
+  arrange(result.likelihood)
 
 eval.after
 
@@ -196,8 +197,6 @@ all.adjustments = before.modeled %>%
 all.adjustments
 
 predict.new.data = function(data, model, hfa.now, league.dif) {
-  model$coefficients['home'] <- hfa.now
-
   make.projection = function(s1, s2, h, model) {
     predict(model, newdata = tibble(spi = s1, spi_opp = s2, home = h)) %>%
       exp()
@@ -218,6 +217,8 @@ predict.new.data = function(data, model, hfa.now, league.dif) {
     score.matrix = score.matrix / sum(score.matrix)
     return(score.matrix)
   }
+  
+  model$coefficients['home'] <- hfa.now
   
   data %>% 
     select(season, date, team1, team2, spi1, spi2, score1, score2) %>% 
@@ -246,32 +247,12 @@ pred.adjustments = all.adjustments %>%
       predict.new.data,
       .progress = TRUE
     )
-  )
+  ) %>%
+  select(-post.covid.data)
 
 pred.adjustments
 
-pred.adjustments$new.preds[[4]]
-
-# pred.adjustments %>% 
-#   select(-post.covid.data, -model) %>% 
-#   mutate(
-#     home.pts = map_dbl(
-#       new.preds,
-#       ~.x %>% 
-#         mutate(home.pts = (score1 > score2) * 3 + (score1 == score2) * 1) %>% 
-#         pull(home.pts) %>% 
-#         sum()
-#     ),
-#     exp.home.pts = map_dbl(
-#       new.preds,
-#       ~.x %>% 
-#         mutate(exp.home.pts = prob1 * 3 + probtie * 1) %>% 
-#         pull(exp.home.pts) %>% 
-#         sum()
-#     )
-#   )
-
-eval.adjustments = pred.adjustments %>% 
+sim.adjustments = pred.adjustments %>% 
   ungroup() %>% 
   mutate(
     home.pts = map_dbl(
@@ -281,28 +262,67 @@ eval.adjustments = pred.adjustments %>%
         pull(home.pts) %>% 
         sum()
     ),
-    pts.distribution = future_map(post.covid.data, generate.points.distribution, .progress = TRUE),
-    exp.home.pts = map_dbl(pts.distribution, mean),
-    sd.home.pts = map_dbl(pts.distribution, sd),
-    actual.z = (home.pts - exp.home.pts) / sd.home.pts
+    pts.distribution = future_map(new.preds, generate.points.distribution, .progress = TRUE),
+  )
+
+sim.adjustments
+
+eval.adjustments = sim.adjustments %>% 
+  select(league, hfa.before, hfa.adjustment, hfa.now, home.pts, pts.distribution) %>% 
+  unnest(pts.distribution) %>% 
+  group_by(league, hfa.before, hfa.adjustment, hfa.now, home.pts) %>% 
+  summarise(
+    result.likelihood = mean(pts.distribution <= home.pts),
+    mean.pts = mean(pts.distribution),
+    min.pts = min(pts.distribution),
+    q025.pts = quantile(pts.distribution, 0.025),
+    median.pts = median(pts.distribution),
+    q975.pts = quantile(pts.distribution, 0.975),
+    max.pts = max(pts.distribution),
+    sd.pts = sd(pts.distribution),
+    .groups = 'drop'
   ) %>% 
-  select(-post.covid.data, -model) %>% 
-  arrange(league, hfa.adjustment)
+  mutate(
+    z.pts = (home.pts - mean.pts) / sd.pts
+  )
 
 eval.adjustments
 
-eval.adjustments %>%
-  group_by(league) %>%
-  mutate(best = abs(actual.z) == min(abs(actual.z))) %>%
-  select(-new.preds, -pts.distribution) %>%
-  write_csv('adjustment-results.csv')
+eval.adjustments %>% write_csv('hfa-adjustment-results.csv')
 
 # pick the adjustment that is the least unlikely (based on z value)
 
 final.adjustment = eval.adjustments %>% 
   group_by(league) %>% 
-  filter(abs(actual.z) == min(abs(actual.z))) %>% 
+  filter(abs(z.pts) == min(abs(z.pts))) %>% 
   arrange(hfa.adjustment) %>% 
   select(league, hfa.before, hfa.adjustment, hfa.now)
 
 final.adjustment
+
+final.adjustment %>% write_csv('final-hfa-adjustment.csv')
+
+plot.before.after.hfa = final.adjustment %>% 
+  mutate(
+    hfa.before = (exp(hfa.before) - 1) * 100,
+    hfa.now = (exp(hfa.now) - 1) * 100,
+  ) %>% 
+  left_join(league.info %>% select(league, alias)) %>% 
+  ggplot(aes(hfa.before, hfa.now, label = alias)) +
+  geom_abline(slope = 1, intercept = 0, color = 'maroon') +
+  geom_point() +
+  geom_text_repel() +
+  scale_x_continuous(limits = c(0,30)) +
+  scale_y_continuous(limits = c(0,30)) +
+  theme_minimal() +
+  labs(
+    title = 'Change in home-field advantage since restart',
+    subtitle = 'Before: Estimate of 538\'s SPI HFA factor\nAfter: Reduction in pre-COVID HFA that best matches new data',
+    x = 'HFA before',
+    y = 'HFA after',
+    caption = 'HFA is represented as percentage increase in predicted goals scored while home team'
+  )
+
+plot.before.after.hfa
+
+ggsave(filename = 'hfa-comparison-before-after.png', plot = plot.before.after.hfa, width = 12, height = 8)
