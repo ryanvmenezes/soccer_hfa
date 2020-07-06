@@ -1,18 +1,18 @@
 league,post.covid.games,home.pts,exp.home.pts,result.likelihood,significant
-German Bundesliga,82,97,127.9429,0.0018,TRUE
-Austrian T-Mobile Bundesliga,56,63,88.4806,0.0024,TRUE
-Swedish Allsvenskan,40,49,61.4558,0.0409,FALSE
-Spanish Segunda Division,72,95,111.7471,0.0514,FALSE
-English League Championship,45,56,66.0272,0.1033,FALSE
-Norwegian Tippeligaen,42,55,64.7714,0.1037,FALSE
-Russian Premier Liga,27,31,38.6238,0.105,FALSE
-Danish SAS-Ligaen,44,60,67.3763,0.1765,FALSE
-Turkish Turkcell Super Lig,30,43,45.6043,0.3217,FALSE
-Italy Serie A,37,55,57.3323,0.3512,FALSE
-Portuguese Liga,50,75,76.2677,0.4186,FALSE
-Spanish Primera Division,64,101,100.9727,0.4785,FALSE
-Italy Serie B,41,62,59.1455,0.6187,FALSE
-Barclays Premier League,37,60,55.7676,0.6976,FALSE
-Greek Super League,30,52,46.6299,0.7653,FALSE
-German 2. Bundesliga,81,131,121.0144,0.7978,FALSE
-Swiss Raiffeisen Super League,22,43,31.1132,0.9795,TRUE
+German Bundesliga,82,97,127.7862,0.002,TRUE
+Austrian T-Mobile Bundesliga,59,66,92.4676,0.0025,TRUE
+Spanish Segunda Division,76,103,117.3427,0.086,FALSE
+Norwegian Tippeligaen,48,63,74.3317,0.0916,FALSE
+Russian Premier Liga,30,35,42.6592,0.1161,FALSE
+English League Championship,48,62,71.2712,0.1315,FALSE
+Swedish Allsvenskan,44,59,67.1851,0.1361,FALSE
+Danish SAS-Ligaen,48,66,72.0301,0.2278,FALSE
+Turkish Turkcell Super Lig,33,47,49.6444,0.3315,FALSE
+Spanish Primera Division,68,102,105.0766,0.3609,FALSE
+Italy Serie A,44,65,66.7853,0.3901,FALSE
+Portuguese Liga,53,81,81.6718,0.4469,FALSE
+Italy Serie B,41,62,59.1365,0.62,FALSE
+Greek Super League,32,53,48.4729,0.7182,FALSE
+Barclays Premier League,41,68,61.8768,0.7648,FALSE
+German 2. Bundesliga,81,131,121.1002,0.788,FALSE
+Swiss Raiffeisen Super League,25,52,37.0932,0.9928,TRUE
